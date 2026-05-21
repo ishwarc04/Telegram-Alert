@@ -37,7 +37,7 @@ def init_db():
         if conn:
             cursor = conn.cursor()
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS alerts (
+                CREATE TABLE IF NOT EXISTS iot_alerts (
                     id SERIAL PRIMARY KEY,
                     message TEXT NOT NULL,
                     created_at TIMESTAMP NOT NULL
@@ -111,7 +111,7 @@ async def create_alert(alert: Alert):
         
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO alerts (message, created_at) VALUES (%s, %s) RETURNING id",
+            "INSERT INTO iot_alerts (message, created_at) VALUES (%s, %s) RETURNING id",
             (alert.message, datetime.now())
         )
         alert_id = cursor.fetchone()[0]
@@ -142,7 +142,7 @@ async def get_alerts():
             raise HTTPException(status_code=500, detail="Database connection failed")
         
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        cursor.execute("SELECT * FROM alerts ORDER BY created_at DESC LIMIT 50")
+        cursor.execute("SELECT * FROM iot_alerts ORDER BY created_at DESC LIMIT 50")
         alerts = cursor.fetchall()
         cursor.close()
         conn.close()
