@@ -1,182 +1,137 @@
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from datetime import datetime
 import httpx
-import os
-from dotenv import load_dotenv
 import psycopg2
-from typing import Optional
+from psycopg2.extras import RealDictCursor
+import os
+from datetime import datetime
+from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
 
 app = FastAPI(title="IoT Alert System")
 
-# CORS middleware for frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Update with your frontend URL in production
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Environment variables
+# Configuration
+DATABASE_URL = os.getenv("DATABASE_URL")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Alert model
+# Pydantic model for alert
 class Alert(BaseModel):
-    error_type: str
-    location: str
-    severity: str  # low, medium, high, critical
     message: str
-    device_id: Optional[str] = None
-    additional_data: Optional[dict] = None
 
 # Database connection
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
-
-# Send message to Telegram
-async def send_telegram_alert(alert: Alert):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials not configured")
-        return False
-    
-    # Format message
-    message = f"""
-🚨 *ALERT NOTIFICATION*
-
-📍 *Location:* {alert.location}
-⚠️ *Error Type:* {alert.error_type}
-🔴 *Severity:* {alert.severity.upper()}
-💬 *Message:* {alert.message}
-"""
-    
-    if alert.device_id:
-        message += f"🔧 *Device ID:* {alert.device_id}\n"
-    
-    message += f"\n⏰ *Time:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
-                "parse_mode": "Markdown"
-            })
-            return response.status_code == 200
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
     except Exception as e:
-        print(f"❌ Telegram error: {e}")
-        return False
-
-# Store alert in database
-def store_alert(alert: Alert):
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            INSERT INTO alerts (error_type, location, severity, message, device_id, additional_data, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (
-            alert.error_type,
-            alert.location,
-            alert.severity,
-            alert.message,
-            alert.device_id,
-            str(alert.additional_data) if alert.additional_data else None,
-            datetime.now()
-        ))
-        
-        alert_id = cursor.fetchone()[0]
-        conn.commit()
-        cursor.close()
-        conn.close()
-        
-        return alert_id
-    except Exception as e:
-        print(f"❌ Database error: {e}")
+        print(f"Database connection error: {e}")
         return None
 
+# Send Telegram message
+async def send_telegram_message(message: str):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
+    
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            return response.json()
+        except Exception as e:
+            print(f"Telegram error: {e}")
+            raise
+
+# Root endpoint
 @app.get("/")
-def read_root():
+async def root():
     return {
         "status": "online",
-        "service": "IoT Alert System",
+        "message": "IoT Alert System API",
         "endpoints": {
-            "POST /alert": "Send new alert",
+            "POST /alert": "Send an alert message",
             "GET /alerts": "Get all alerts",
             "GET /health": "Health check"
         }
     }
 
+# Health check
+@app.get("/health")
+async def health_check():
+    db_status = "connected"
+    conn = get_db_connection()
+    if conn:
+        conn.close()
+    else:
+        db_status = "disconnected"
+    
+    return {
+        "status": "healthy",
+        "database": db_status,
+        "timestamp": datetime.now().isoformat()
+    }
+
+# Create alert endpoint
 @app.post("/alert")
 async def create_alert(alert: Alert):
-    """
-    Receive alert from frontend and forward to Telegram
-    """
     try:
-        # Store in database
-        alert_id = store_alert(alert)
+        # Save to database
+        conn = get_db_connection()
+        if not conn:
+            raise HTTPException(status_code=500, detail="Database connection failed")
         
-        # Send to Telegram
-        telegram_sent = await send_telegram_alert(alert)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO alerts (message, created_at) VALUES (%s, %s) RETURNING id",
+            (alert.message, datetime.now())
+        )
+        alert_id = cursor.fetchone()[0]
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        # Send Telegram notification
+        telegram_message = f"🚨 <b>New Alert</b>\n\n{alert.message}\n\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        await send_telegram_message(telegram_message)
         
         return {
             "success": True,
             "alert_id": alert_id,
-            "telegram_sent": telegram_sent,
-            "message": "Alert processed successfully"
+            "message": "Alert sent successfully",
+            "telegram_sent": True
         }
-    
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
+# Get all alerts
 @app.get("/alerts")
-def get_alerts(limit: int = 50):
-    """
-    Get recent alerts from database
-    """
+async def get_alerts():
     try:
         conn = get_db_connection()
-        cursor = conn.cursor()
+        if not conn:
+            raise HTTPException(status_code=500, detail="Database connection failed")
         
-        cursor.execute("""
-            SELECT id, error_type, location, severity, message, device_id, created_at
-            FROM alerts
-            ORDER BY created_at DESC
-            LIMIT %s
-        """, (limit,))
-        
-        alerts = []
-        for row in cursor.fetchall():
-            alerts.append({
-                "id": row[0],
-                "error_type": row[1],
-                "location": row[2],
-                "severity": row[3],
-                "message": row[4],
-                "device_id": row[5],
-                "created_at": row[6].isoformat() if row[6] else None
-            })
-        
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("SELECT * FROM alerts ORDER BY created_at DESC LIMIT 50")
+        alerts = cursor.fetchall()
         cursor.close()
         conn.close()
         
-        return {"alerts": alerts, "count": len(alerts)}
-    
+        return {
+            "success": True,
+            "count": len(alerts),
+            "alerts": alerts
+        }
+        
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/health")
-def health_check():
-    return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
