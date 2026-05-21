@@ -30,6 +30,29 @@ def get_db_connection():
         print(f"Database connection error: {e}")
         return None
 
+# Initialize database table on startup
+def init_db():
+    try:
+        conn = get_db_connection()
+        if conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id SERIAL PRIMARY KEY,
+                    message TEXT NOT NULL,
+                    created_at TIMESTAMP NOT NULL
+                )
+            """)
+            conn.commit()
+            cursor.close()
+            conn.close()
+            print("✅ Database initialized successfully")
+    except Exception as e:
+        print(f"❌ Database initialization error: {e}")
+
+# Initialize database on startup
+init_db()
+
 # Send Telegram message
 async def send_telegram_message(message: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
